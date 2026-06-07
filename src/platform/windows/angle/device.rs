@@ -9,9 +9,16 @@ use crate::platform::generic::egl::device::EGL_FUNCTIONS;
 use crate::platform::generic::egl::ffi::EGL_DEVICE_EXT;
 use crate::platform::generic::egl::ffi::{EGL_D3D11_DEVICE_ANGLE, EGL_EXTENSION_FUNCTIONS};
 use crate::platform::generic::egl::ffi::{EGL_NO_DEVICE_EXT, EGL_PLATFORM_DEVICE_EXT};
+#[cfg(debug_assertions)]
+use crate::platform::generic::egl::ffi::{
+    EGLDebugProcKHR, EGLLabelKHR, EGL_DEBUG_MSG_CRITICAL_KHR, EGL_DEBUG_MSG_ERROR_KHR,
+    EGL_DEBUG_MSG_INFO_KHR, EGL_DEBUG_MSG_WARN_KHR,
+};
 use crate::{Error, GLApi};
 
 use std::cell::{RefCell, RefMut};
+#[cfg(debug_assertions)]
+use std::ffi::CStr;
 use std::mem;
 use std::os::raw::c_void;
 use std::ptr;
@@ -27,6 +34,31 @@ use wio::com::ComPtr;
 
 thread_local! {
     static DXGI_FACTORY: RefCell<Option<ComPtr<IDXGIFactory1>>> = RefCell::new(None);
+}
+
+#[cfg(debug_assertions)]
+unsafe extern "system" fn egl_debug_callback(
+    _error: crate::egl::types::EGLenum,
+    command: *const std::os::raw::c_char,
+    message_type: crate::egl::types::EGLint,
+    _thread_label: EGLLabelKHR,
+    _object_label: EGLLabelKHR,
+    message: *const std::os::raw::c_char,
+) {
+    let level = match message_type as u32 {
+        EGL_DEBUG_MSG_CRITICAL_KHR => "CRITICAL",
+        EGL_DEBUG_MSG_ERROR_KHR => "ERROR",
+        EGL_DEBUG_MSG_WARN_KHR => "WARN",
+        EGL_DEBUG_MSG_INFO_KHR => "INFO",
+        _ => "UNKNOWN",
+    };
+    let command = CStr::from_ptr(command).to_string_lossy();
+    let message = if message.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        CStr::from_ptr(message).to_string_lossy()
+    };
+    eprintln!("[ANGLE {level}] {command}: {message}");
 }
 
 /// Represents a hardware display adapter that can be used for rendering (including the CPU).
@@ -78,10 +110,12 @@ impl Adapter {
                     dxgi_factory_slot.borrow_mut();
                 if dxgi_factory_slot.is_none() {
                     let mut dxgi_factory: *mut IDXGIFactory1 = ptr::null_mut();
+                    super::trace::trace_point("CreateDXGIFactory1...");
                     let result = dxgi::CreateDXGIFactory1(
                         &IDXGIFactory1::uuidof(),
                         &mut dxgi_factory as *mut *mut IDXGIFactory1 as *mut *mut c_void,
                     );
+                    super::trace::trace_point("CreateDXGIFactory1 done");
                     if !winerror::SUCCEEDED(result) {
                         return Err(Error::Failed);
                     }
@@ -166,6 +200,7 @@ impl Device {
     #[allow(non_snake_case)]
     pub(crate) fn new(adapter: &Adapter) -> Result<Device, Error> {
         let d3d_driver_type = adapter.d3d_driver_type;
+        super::trace::trace_point("Device::new: entered");
         unsafe {
             let mut d3d11_device = ptr::null_mut();
             let mut d3d11_feature_level = 0;
@@ -174,6 +209,7 @@ impl Device {
             } else {
                 adapter.dxgi_adapter.as_raw()
             };
+            super::trace::trace_point("D3D11CreateDevice...");
             let result = D3D11CreateDevice(
                 d3d11_adapter,
                 d3d_driver_type,
@@ -186,35 +222,69 @@ impl Device {
                 &mut d3d11_feature_level,
                 ptr::null_mut(),
             );
+            super::trace::trace_point("D3D11CreateDevice done");
             if !winerror::SUCCEEDED(result) {
                 return Err(Error::DeviceOpenFailed);
             }
             debug_assert!(d3d11_feature_level >= D3D_FEATURE_LEVEL_9_3);
             let d3d11_device = ComPtr::from_raw(d3d11_device);
 
+            super::trace::trace_point("EGL_EXTENSION_FUNCTIONS init...");
             let eglCreateDeviceANGLE = EGL_EXTENSION_FUNCTIONS
                 .CreateDeviceANGLE
                 .expect("Where's the `EGL_ANGLE_device_creation` extension?");
-            let egl_device = eglCreateDeviceANGLE(
-                EGL_D3D11_DEVICE_ANGLE as EGLint,
-                d3d11_device.as_raw() as *mut c_void,
-                ptr::null_mut(),
-            );
+            super::trace::trace_point("EGL_EXTENSION_FUNCTIONS init done");
+            let egl_device = super::trace::trace("eglCreateDeviceANGLE", || {
+                eglCreateDeviceANGLE(
+                    EGL_D3D11_DEVICE_ANGLE as EGLint,
+                    d3d11_device.as_raw() as *mut c_void,
+                    ptr::null_mut(),
+                )
+            });
             assert_ne!(egl_device, EGL_NO_DEVICE_EXT);
 
+            super::trace::trace_point("EGL_FUNCTIONS.with (may init EGL library)...");
             EGL_FUNCTIONS.with(|egl| {
+                super::trace::trace_point("EGL_FUNCTIONS.with: entered");
                 let attribs = [egl::NONE as EGLAttrib, egl::NONE as EGLAttrib, 0, 0];
-                let egl_display = egl.GetPlatformDisplay(
-                    EGL_PLATFORM_DEVICE_EXT,
-                    egl_device as *mut c_void,
-                    &attribs[0],
-                );
+                let egl_display = super::trace::trace("eglGetPlatformDisplay", || {
+                    egl.GetPlatformDisplay(
+                        EGL_PLATFORM_DEVICE_EXT,
+                        egl_device as *mut c_void,
+                        &attribs[0],
+                    )
+                });
                 assert_ne!(egl_display, egl::NO_DISPLAY);
 
                 // I don't think this should ever fail.
                 let (mut major_version, mut minor_version) = (0, 0);
+                super::trace::trace_point("eglInitialize...");
                 let result = egl.Initialize(egl_display, &mut major_version, &mut minor_version);
+                super::trace::trace_point("eglInitialize done");
                 assert_ne!(result, egl::FALSE);
+
+                #[cfg(debug_assertions)]
+                if let Some(debug_message_control) =
+                    EGL_EXTENSION_FUNCTIONS.DebugMessageControlKHR
+                {
+                    eprintln!("[ANGLE] EGL_KHR_debug available, registering callback");
+                    let attrib_list = [
+                        EGL_DEBUG_MSG_CRITICAL_KHR as EGLAttrib,
+                        egl::TRUE as EGLAttrib,
+                        EGL_DEBUG_MSG_ERROR_KHR as EGLAttrib,
+                        egl::TRUE as EGLAttrib,
+                        EGL_DEBUG_MSG_WARN_KHR as EGLAttrib,
+                        egl::TRUE as EGLAttrib,
+                        EGL_DEBUG_MSG_INFO_KHR as EGLAttrib,
+                        egl::TRUE as EGLAttrib,
+                        egl::NONE as EGLAttrib,
+                        0,
+                    ];
+                    debug_message_control(
+                        Some(egl_debug_callback as EGLDebugProcKHR),
+                        attrib_list.as_ptr(),
+                    );
+                }
 
                 Ok(Device {
                     egl_display,
