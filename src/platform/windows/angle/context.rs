@@ -92,19 +92,19 @@ impl Device {
     ) -> Result<Context, Error> {
         let (egl_context, id) = {
             let mut next_context_id_lock = CREATE_CONTEXT_MUTEX.lock().unwrap();
-            let egl_context = unsafe {
+            let egl_context = super::trace::trace("eglCreateContext", || unsafe {
                 context::create_context(
                     self.egl_display,
                     descriptor,
                     share_with.map_or(egl::NO_CONTEXT, |ctx| ctx.egl_context),
                     self.gl_api(),
-                )?
-            };
+                )
+            })?;
             next_context_id_lock.0 += 1;
             (egl_context, *next_context_id_lock)
         };
 
-        unsafe {
+        super::trace::trace("eglMakeCurrent", || unsafe {
             EGL_FUNCTIONS.with(|egl| {
                 let result = egl.MakeCurrent(
                     self.egl_display,
@@ -118,15 +118,17 @@ impl Device {
                     ));
                 }
                 Ok(())
-            })?;
-        }
+            })
+        })?;
 
         let context = Context {
             egl_context,
             id,
             framebuffer: Framebuffer::None,
             context_is_owned: true,
-            gl: unsafe { Gl::from_loader_function(context::get_proc_address) },
+            gl: super::trace::trace("Gl::from_loader_function", || unsafe {
+                Gl::from_loader_function(context::get_proc_address)
+            }),
         };
         Ok(context)
     }
