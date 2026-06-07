@@ -7,7 +7,7 @@
 use crate::egl::types::{EGLAttrib, EGLBoolean, EGLContext, EGLDeviceEXT, EGLDisplay, EGLSurface};
 use crate::egl::types::{EGLenum, EGLint};
 
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_void};
 use std::sync::LazyLock;
 
 pub enum EGLClientBufferOpaque {}
@@ -34,6 +34,22 @@ pub const EGL_D3D_TEXTURE_ANGLE: EGLenum = 0x33a3;
 
 pub const EGL_NO_DEVICE_EXT: EGLDeviceEXT = 0 as EGLDeviceEXT;
 pub const EGL_NO_IMAGE_KHR: EGLImageKHR = 0 as EGLImageKHR;
+
+// EGL_KHR_debug
+pub const EGL_DEBUG_MSG_CRITICAL_KHR: EGLenum = 0x33b9;
+pub const EGL_DEBUG_MSG_ERROR_KHR: EGLenum = 0x33ba;
+pub const EGL_DEBUG_MSG_WARN_KHR: EGLenum = 0x33bb;
+pub const EGL_DEBUG_MSG_INFO_KHR: EGLenum = 0x33bc;
+
+pub type EGLLabelKHR = *mut c_void;
+pub type EGLDebugProcKHR = unsafe extern "system" fn(
+    error: EGLenum,
+    command: *const c_char,
+    message_type: EGLint,
+    thread_label: EGLLabelKHR,
+    object_label: EGLLabelKHR,
+    message: *const c_char,
+);
 
 pub const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT: EGLint = 1;
 pub const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT: EGLint = 2;
@@ -75,6 +91,9 @@ pub(crate) struct EGLExtensionFunctions {
             value: *mut *mut c_void,
         ) -> EGLBoolean,
     >,
+    pub(crate) DebugMessageControlKHR: Option<
+        extern "C" fn(callback: Option<EGLDebugProcKHR>, attrib_list: *const EGLAttrib) -> EGLint,
+    >,
 }
 
 pub(crate) static EGL_EXTENSION_FUNCTIONS: LazyLock<EGLExtensionFunctions> = LazyLock::new(|| {
@@ -91,6 +110,7 @@ pub(crate) static EGL_EXTENSION_FUNCTIONS: LazyLock<EGLExtensionFunctions> = Laz
             QueryDeviceAttribEXT: cast(get(c"eglQueryDeviceAttribEXT")),
             QueryDisplayAttribEXT: cast(get(c"eglQueryDisplayAttribEXT")),
             QuerySurfacePointerANGLE: cast(get(c"eglQuerySurfacePointerANGLE")),
+            DebugMessageControlKHR: cast(get(c"eglDebugMessageControlKHR")),
         }
     }
 });
